@@ -1,7 +1,7 @@
 
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { 
-  FileText, Download, Trash2, AlertCircle, CheckCircle, Loader2, Settings, Zap, Sparkles, ChevronDown, RefreshCw, Languages, Plus, Search, Link2, Book, Brain, Type, Volume2, VolumeX, SkipBack, SkipForward, LogOut, Eye, EyeOff, Menu, ScrollText, Key, ExternalLink, Github, HelpCircle, AlertTriangle, X, PlusCircle, History, Hourglass, Info, Wand2, FileArchive, ArrowRight, Play, Pause, Square, Sliders, Coffee, Sun, Moon, FileOutput, Save, BookOpen, ToggleLeft, ToggleRight, Wand, UploadCloud, Smartphone, Maximize2, Minimize2, MoreHorizontal, FileSearch, PlayCircle, ShieldCheck
+  FileText, Download, Trash2, AlertCircle, CheckCircle, Loader2, Settings, Zap, Sparkles, ChevronDown, RefreshCw, Languages, Plus, Search, Link2, Book, Brain, Type, Volume2, VolumeX, SkipBack, SkipForward, LogOut, Eye, EyeOff, Menu, ScrollText, Key, ExternalLink, Github, HelpCircle, AlertTriangle, X, PlusCircle, History, Hourglass, Info, Wand2, FileArchive, ArrowRight, Play, Pause, Square, Sliders, Coffee, Sun, Moon, FileOutput, Save, BookOpen, ToggleLeft, ToggleRight, Wand, UploadCloud, Smartphone, Maximize2, Minimize2, MoreHorizontal, FileSearch, PlayCircle, ShieldCheck, CheckSquare, Square as SquareIcon, FileCode
 } from 'lucide-react';
 import { FileItem, FileStatus, StoryProject, ReaderSettings } from './utils/types';
 import { DEFAULT_PROMPT, MODEL_CONFIGS, AVAILABLE_LANGUAGES, AVAILABLE_GENRES, AVAILABLE_PERSONALITIES, AVAILABLE_SETTINGS, AVAILABLE_FLOWS, DEFAULT_DICTIONARY } from './constants';
@@ -50,6 +50,12 @@ const App: React.FC = () => {
   const isFetchingLinksRef = useRef<boolean>(false);
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false);
+
+  // New features states
+  const [crawlOption, setCrawlOption] = useState<'single' | 'multi'>('multi');
+  const [isCrawlOnly, setIsCrawlOnly] = useState<boolean>(false);
+  const [selectedChapterIds, setSelectedChapterIds] = useState<string[]>([]);
+  const [isSelectionMode, setIsSelectionMode] = useState<boolean>(false);
   
   // Multi API Key States
   const [apiKeys, setApiKeys] = useState<string[]>(() => {
@@ -121,11 +127,8 @@ const App: React.FC = () => {
 
   const getAvailableApiKey = useCallback(() => {
     const now = Date.now();
-    // Ưu tiên key từ process.env.API_KEY nếu có và không nằm trong list user
     const sysKey = process.env.API_KEY;
     if (sysKey && !keyCooldowns[sysKey]) return sysKey;
-
-    // Tìm trong list user các key không bị cooldown
     const available = apiKeys.find(k => !keyCooldowns[k] || keyCooldowns[k] < now);
     return available || sysKey || null;
   }, [apiKeys, keyCooldowns]);
@@ -196,7 +199,7 @@ const App: React.FC = () => {
         addToast("Phân tích AI hoàn tất!", "success");
     } catch (e: any) {
         if (e.status === 429 || e.message?.includes("Resource has been exhausted")) {
-          markKeyAsCooldown(key, 300000); // 5p nếu hết quota phân tích
+          markKeyAsCooldown(key, 300000); 
           addToast("Key hiện tại hết quota, vui lòng thử lại sau giây lát.", "warning");
         } else {
           addToast(e.message, "error");
@@ -251,13 +254,15 @@ const App: React.FC = () => {
     updateProject(currentProject.id, { chapters: [...currentProject.chapters, ...newChapters] });
   };
 
-  const handleLinkCrawl = async (targetUrl?: string) => {
+  const handleLinkCrawl = async (targetUrl?: string, chainCount: number = 1) => {
     if (!currentProject || isFetchingLinksRef.current) return;
     const startUrl = targetUrl || linkInput;
     if (!startUrl) return;
+    
     isFetchingLinksRef.current = true;
     setIsFetchingLinks(true);
     setShowLinkModal(false);
+    
     try {
         const result = await fetchContentFromUrl(startUrl);
         const nextOrder = currentProject.chapters.length;
@@ -267,15 +272,35 @@ const App: React.FC = () => {
             content: result.content, translatedContent: null, status: FileStatus.IDLE, 
             retryCount: 0, originalCharCount: result.content.length, remainingRawCharCount: 0 
         };
+        
         setProjects(prev => prev.map(p => p.id === currentProject.id ? { 
             ...p, chapters: [...p.chapters, newChapter], lastCrawlUrl: result.nextUrl || startUrl, lastModified: Date.now()
         } : p));
-        if (isProcessing) setProcessingQueue(prev => [...new Set([...prev, chapterId])]);
+
+        // If not "crawl only", add to queue
+        if (!isCrawlOnly) {
+          if (isProcessing) {
+            setProcessingQueue(prev => [...new Set([...prev, chapterId])]);
+          } else {
+            // Trigger auto processing if needed
+            // setProcessingQueue([chapterId]);
+            // setIsProcessing(true);
+          }
+        }
+
+        // Chain crawling if multi is selected
+        if (chainCount > 1 && result.nextUrl) {
+          isFetchingLinksRef.current = false;
+          await new Promise(r => setTimeout(r, 1000)); // Delay between crawls to be safe
+          handleLinkCrawl(result.nextUrl, chainCount - 1);
+        }
     } catch (e: any) { 
       addToast(e.message, "error");
       if (isProcessing) setIsAutoCrawlEnabled(false);
     } finally {
-        isFetchingLinksRef.current = false; setIsFetchingLinks(false); setLinkInput("");
+        isFetchingLinksRef.current = false; 
+        setIsFetchingLinks(false); 
+        if (chainCount <= 1) setLinkInput("");
     }
   };
 
@@ -298,7 +323,17 @@ const App: React.FC = () => {
     if (!currentProject) return;
     const content = createMergedFile(currentProject.chapters);
     downloadTextFile(`${currentProject.info.title}.txt`, content);
-    addToast("Đã xuất file TXT", "success");
+    addToast("Đã xuất file dịch (TXT)", "success");
+  };
+
+  const handleExportRawTxt = () => {
+    if (!currentProject) return;
+    const rawContent = [...currentProject.chapters]
+      .sort((a, b) => a.orderIndex - b.orderIndex)
+      .map(f => `### ${f.name}\n\n${f.content}`)
+      .join('\n\n');
+    downloadTextFile(`${currentProject.info.title}_Goc.txt`, rawContent);
+    addToast("Đã xuất file gốc (TXT)", "success");
   };
 
   const startTranslation = useCallback((retryAll: boolean = false) => {
@@ -310,18 +345,43 @@ const App: React.FC = () => {
             setIsProcessing(true);
             return;
         }
-        addToast("Không có chương mới", "info");
+        addToast("Không có chương mới cần dịch", "info");
         return;
     }
     setProcessingQueue(prev => [...new Set([...prev, ...toProcess])]);
     setIsProcessing(true);
-  }, [currentProject, isAutoCrawlEnabled]);
+  }, [currentProject, isAutoCrawlEnabled, isCrawlOnly]);
 
   const stopTranslation = useCallback(() => {
     setIsProcessing(false); 
     setProcessingQueue([]);
     addToast("Đã dừng tiến trình dịch", "info");
   }, []);
+
+  const handleBulkDelete = () => {
+    if (!currentProject || selectedChapterIds.length === 0) return;
+    if (!confirm(`Bạn có chắc muốn xóa ${selectedChapterIds.length} chương đã chọn?`)) return;
+    
+    updateProject(currentProject.id, {
+      chapters: currentProject.chapters.filter(c => !selectedChapterIds.includes(c.id))
+    });
+    setSelectedChapterIds([]);
+    setIsSelectionMode(false);
+    addToast(`Đã xóa ${selectedChapterIds.length} chương`, "success");
+  };
+
+  const toggleSelection = (id: string) => {
+    setSelectedChapterIds(prev => prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]);
+  };
+
+  const selectAll = () => {
+    if (!currentProject) return;
+    if (selectedChapterIds.length === currentProject.chapters.length) {
+      setSelectedChapterIds([]);
+    } else {
+      setSelectedChapterIds(currentProject.chapters.map(c => c.id));
+    }
+  };
 
   useEffect(() => {
     if (!isProcessing || !currentProjectId) return;
@@ -345,7 +405,7 @@ const App: React.FC = () => {
         if (!apiKey) {
             addToast("Hết API Key khả dụng. Đang chờ 30 giây...", "warning");
             await new Promise(r => setTimeout(r, 30000));
-            return; // Loop back and try again
+            return; 
         }
 
         setProcessingQueue(prev => prev.slice(BATCH_FILE_LIMIT));
@@ -382,11 +442,9 @@ const App: React.FC = () => {
                 return c;
             }) } : p));
         } catch (e: any) {
-            // Xử lý xoay vòng Key khi gặp lỗi quota
             if (e.status === 429 || e.message?.includes("Resource has been exhausted") || e.message?.includes("429")) {
-                markKeyAsCooldown(apiKey, 60000); // Cooldown 1p cho key này
+                markKeyAsCooldown(apiKey, 60000); 
                 addToast("Key hiện tại đạt giới hạn, tự động chuyển sang Key tiếp theo...", "info");
-                // Đưa các chương này trở lại hàng đợi để dịch lại với Key khác
                 setProcessingQueue(prev => [...batchIds, ...prev]);
             } else {
                 setProjects(prev => prev.map(p => p.id === currentProjectId ? { ...p, chapters: p.chapters.map(c => batchIds.includes(c.id) ? { ...c, status: FileStatus.ERROR, errorMessage: e.message } : c) } : p));
@@ -406,7 +464,6 @@ const App: React.FC = () => {
   const viewingChapter = useMemo(() => sortedChapters.find(c => c.id === viewingFileId) || null, [sortedChapters, viewingFileId]);
   const viewingRawFile = useMemo(() => sortedChapters.find(c => c.id === viewingRawId) || null, [sortedChapters, viewingRawId]);
 
-  // TTS Refined Logic
   const stopTTS = useCallback(() => {
     if (synthesisRef.current) {
         synthesisRef.current.cancel();
@@ -423,7 +480,6 @@ const App: React.FC = () => {
     }
     
     synthesisRef.current.cancel();
-
     const paragraphs = viewingChapter.translatedContent.split('\n').filter(p => p.trim());
     
     if (startIndex >= paragraphs.length) { 
@@ -481,7 +537,6 @@ const App: React.FC = () => {
 
   const toggleTTSPause = () => {
     if (!synthesisRef.current) return;
-
     if (synthesisRef.current.speaking) {
         if (synthesisRef.current.paused) { 
             synthesisRef.current.resume(); 
@@ -555,29 +610,69 @@ const App: React.FC = () => {
               <div className="h-full flex flex-col items-center justify-center text-center max-w-sm mx-auto"><div className="w-24 h-24 bg-white rounded-[2rem] flex items-center justify-center mb-8 text-slate-300 shadow-xl border border-slate-100"><Book className="w-12 h-12" /></div><h2 className="text-2xl font-bold text-slate-800 mb-3 font-display">Bắt đầu dịch thuật!</h2><button onClick={() => setShowNewProjectModal(true)} className="flex items-center gap-3 bg-indigo-600 text-white font-bold py-5 px-10 rounded-3xl shadow-2xl active:scale-95 transition-all text-lg"><Plus className="w-6 h-6" />Tạo Dự Án</button></div>
           ) : (
             <div className="max-w-6xl mx-auto space-y-8 animate-in fade-in duration-500">
-                <div className="flex flex-wrap gap-4">
-                    <input type="file" id="up" className="hidden" multiple accept=".txt,.zip" onChange={handleFileUpload} />
-                    <label htmlFor="up" className="flex items-center gap-3 bg-white border-2 border-slate-100 p-4 rounded-3xl cursor-pointer hover:border-indigo-400 font-bold text-slate-600 shadow-md transition-all active:scale-95"><PlusCircle className="w-6 h-6 text-indigo-500" />Thêm File</label>
-                    <button onClick={() => setShowLinkModal(true)} className="flex items-center gap-3 bg-white border-2 border-slate-100 p-4 rounded-3xl hover:border-amber-400 font-bold text-slate-600 shadow-md transition-all active:scale-95"><Link2 className="w-6 h-6 text-amber-500" />Cào Link</button>
-                    <div className="flex gap-2 bg-white p-2 rounded-3xl shadow-md border-2 border-slate-100">
-                        <button onClick={handleExportTxt} className="flex items-center gap-2 bg-slate-100 text-slate-600 p-3 rounded-2xl hover:bg-slate-200 font-bold transition-all"><FileOutput className="w-5 h-5" />TXT</button>
-                        <button onClick={handleExportEpub} className="flex items-center gap-2 bg-indigo-600 text-white p-3 rounded-2xl hover:bg-indigo-700 font-bold transition-all"><BookOpen className="w-5 h-5" />EPUB</button>
+                <div className="flex flex-wrap items-center justify-between gap-4 bg-white/50 p-6 rounded-[2.5rem] border border-slate-100 backdrop-blur-sm">
+                    <div className="flex flex-wrap gap-4">
+                      <input type="file" id="up" className="hidden" multiple accept=".txt,.zip" onChange={handleFileUpload} />
+                      <label htmlFor="up" className="flex items-center gap-3 bg-white border-2 border-slate-100 p-4 rounded-3xl cursor-pointer hover:border-indigo-400 font-bold text-slate-600 shadow-md transition-all active:scale-95"><PlusCircle className="w-6 h-6 text-indigo-500" />Thêm File</label>
+                      <button onClick={() => setShowLinkModal(true)} className="flex items-center gap-3 bg-white border-2 border-slate-100 p-4 rounded-3xl hover:border-amber-400 font-bold text-slate-600 shadow-md transition-all active:scale-95"><Link2 className="w-6 h-6 text-amber-500" />Cào Link</button>
+                    </div>
+
+                    <div className="flex flex-wrap gap-3">
+                        <div className="flex gap-2 bg-white p-2 rounded-3xl shadow-md border-2 border-slate-100">
+                            <button onClick={handleExportTxt} className="flex items-center gap-2 bg-slate-100 text-slate-600 p-3 rounded-2xl hover:bg-slate-200 font-bold transition-all"><FileOutput className="w-5 h-5" />Dịch</button>
+                            <button onClick={handleExportRawTxt} title="Xuất file gốc chưa dịch" className="flex items-center gap-2 bg-slate-100 text-slate-600 p-3 rounded-2xl hover:bg-slate-200 font-bold transition-all"><FileCode className="w-5 h-5" />Gốc</button>
+                            <button onClick={handleExportEpub} className="flex items-center gap-2 bg-indigo-600 text-white p-3 rounded-2xl hover:bg-indigo-700 font-bold transition-all"><BookOpen className="w-5 h-5" />EPUB</button>
+                        </div>
+                        
+                        <div className="flex gap-2 bg-white p-2 rounded-3xl shadow-md border-2 border-slate-100">
+                            <button onClick={() => setIsSelectionMode(!isSelectionMode)} className={`flex items-center gap-2 p-3 rounded-2xl font-bold transition-all ${isSelectionMode ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+                                {isSelectionMode ? <CheckSquare className="w-5 h-5" /> : <SquareIcon className="w-5 h-5" />}
+                                {isSelectionMode ? 'Hủy chọn' : 'Chọn nhiều'}
+                            </button>
+                            {isSelectionMode && (
+                              <>
+                                <button onClick={selectAll} className="p-3 bg-slate-100 text-slate-600 rounded-2xl font-bold">Tất cả</button>
+                                <button onClick={handleBulkDelete} disabled={selectedChapterIds.length === 0} className="flex items-center gap-2 bg-rose-500 text-white p-3 rounded-2xl hover:bg-rose-600 font-bold disabled:opacity-50 transition-all">
+                                  <Trash2 className="w-5 h-5" /> ({selectedChapterIds.length})
+                                </button>
+                              </>
+                            )}
+                        </div>
                     </div>
                 </div>
+
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
                     {sortedChapters.map((ch) => {
                         const { label, color } = getStatusLabel(ch.status);
+                        const isSelected = selectedChapterIds.includes(ch.id);
                         return (
-                            <div key={ch.id} onClick={() => ch.status === FileStatus.COMPLETED && openReader(ch.id)} className={`bg-white p-6 rounded-[2rem] border border-slate-100 hover:shadow-2xl transition-all relative overflow-hidden group cursor-pointer ${ch.status === FileStatus.COMPLETED ? 'hover:scale-[1.02]' : ''}`}>
+                            <div 
+                              key={ch.id} 
+                              onClick={() => {
+                                if (isSelectionMode) {
+                                  toggleSelection(ch.id);
+                                } else if (ch.status === FileStatus.COMPLETED) {
+                                  openReader(ch.id);
+                                }
+                              }} 
+                              className={`bg-white p-6 rounded-[2rem] border transition-all relative overflow-hidden group cursor-pointer ${isSelected ? 'border-indigo-500 shadow-indigo-100 shadow-xl' : 'border-slate-100 hover:shadow-2xl'} ${ch.status === FileStatus.COMPLETED && !isSelectionMode ? 'hover:scale-[1.02]' : ''}`}
+                            >
+                                {isSelectionMode && (
+                                  <div className={`absolute top-4 left-4 z-10 w-6 h-6 rounded-lg border-2 flex items-center justify-center transition-all ${isSelected ? 'bg-indigo-600 border-indigo-600' : 'bg-white border-slate-200'}`}>
+                                    {isSelected && <CheckCircle className="w-4 h-4 text-white" />}
+                                  </div>
+                                )}
                                 <div className="absolute top-0 right-0 p-3 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                                     <button onClick={(e) => { e.stopPropagation(); setViewingRawId(ch.id); }} title="Xem bản gốc" className="p-2 bg-indigo-50 text-indigo-600 rounded-xl hover:bg-indigo-600 hover:text-white transition-all"><ScrollText className="w-4 h-4" /></button>
-                                    <button onClick={(e) => { e.stopPropagation(); updateProject(currentProject.id, { chapters: currentProject.chapters.filter(c => c.id !== ch.id) }); }} className="p-2 bg-rose-50 text-rose-500 rounded-xl hover:bg-rose-500 hover:text-white transition-all"><Trash2 className="w-4 h-4" /></button>
+                                    {!isSelectionMode && (
+                                      <button onClick={(e) => { e.stopPropagation(); updateProject(currentProject.id, { chapters: currentProject.chapters.filter(c => c.id !== ch.id) }); }} className="p-2 bg-rose-50 text-rose-500 rounded-xl hover:bg-rose-500 hover:text-white transition-all"><Trash2 className="w-4 h-4" /></button>
+                                    )}
                                 </div>
-                                <h4 className="font-bold text-slate-800 truncate mb-4 text-lg" title={String(ch.name)}>{String(ch.name)}</h4>
+                                <h4 className="font-bold text-slate-800 truncate mb-4 text-lg mt-2" title={String(ch.name)}>{String(ch.name)}</h4>
                                 <div className="flex flex-col gap-2">
                                     <div className="flex items-center justify-between">
                                         <span className={`text-[10px] font-bold uppercase tracking-wider px-3 py-1.5 rounded-full ${color}`}>{label}</span>
-                                        {ch.status === FileStatus.COMPLETED && <div className="p-2.5 bg-indigo-50 text-indigo-600 rounded-2xl"><Eye className="w-5 h-5" /></div>}
+                                        {ch.status === FileStatus.COMPLETED && !isSelectionMode && <div className="p-2.5 bg-indigo-50 text-indigo-600 rounded-2xl"><Eye className="w-5 h-5" /></div>}
                                     </div>
                                     {ch.status === FileStatus.ERROR && ch.errorMessage && (
                                         <p className="text-[10px] text-rose-500 font-bold leading-tight">{ch.errorMessage}</p>
@@ -722,7 +817,51 @@ const App: React.FC = () => {
       
       {showNewProjectModal && (<div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"><div className="bg-white rounded-[3rem] w-full max-w-xl p-10 shadow-2xl space-y-6"><h3 className="font-bold text-2xl">Tạo truyện mới</h3><input type="text" placeholder="Tên truyện" value={newProjectInfo.title} onChange={(e) => setNewProjectInfo({...newProjectInfo, title: e.target.value})} className="w-full p-5 rounded-[1.5rem] bg-slate-50 border-2 border-transparent focus:border-indigo-500 outline-none font-bold" /><div className="flex gap-4 pt-4"><button onClick={() => setShowNewProjectModal(false)} className="flex-1 font-bold text-slate-400">Hủy</button><button onClick={createNewProject} className="flex-[2] bg-indigo-600 text-white font-bold py-5 rounded-[1.5rem] shadow-xl">Xác nhận</button></div></div></div>)}
 
-      {showLinkModal && (<div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"><div className="bg-white rounded-[3rem] w-full max-w-xl p-10 shadow-2xl space-y-8"><h3 className="font-bold text-2xl">Cào Link Truyện</h3><input type="text" placeholder="Link chương đầu" value={linkInput} onChange={(e) => setLinkInput(e.target.value)} className="w-full p-5 rounded-[1.5rem] bg-slate-50 border-2 border-transparent focus:border-indigo-500 outline-none font-medium" /><div className="flex gap-4 pt-4"><button onClick={() => setShowLinkModal(false)} className="flex-1 font-bold text-slate-400">Hủy</button><button onClick={() => handleLinkCrawl()} className="flex-[2] bg-indigo-600 text-white font-bold py-5 rounded-[1.5rem] shadow-xl">Bắt đầu nạp</button></div></div></div>)}
+      {showLinkModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+          <div className="bg-white rounded-[3rem] w-full max-w-xl p-10 shadow-2xl space-y-8 animate-in zoom-in-95 duration-300">
+            <h3 className="font-bold text-2xl">Cào Link Truyện</h3>
+            <div className="space-y-4">
+              <input 
+                type="text" 
+                placeholder="Dán link chương tại đây (VD: Piaotia, Biquge...)" 
+                value={linkInput} 
+                onChange={(e) => setLinkInput(e.target.value)} 
+                className="w-full p-5 rounded-[1.5rem] bg-slate-50 border-2 border-transparent focus:border-indigo-500 outline-none font-medium transition-all" 
+              />
+              
+              <div className="grid grid-cols-2 gap-4">
+                <button 
+                  onClick={() => setCrawlOption('single')} 
+                  className={`p-4 rounded-2xl font-bold transition-all border-2 ${crawlOption === 'single' ? 'bg-indigo-50 border-indigo-500 text-indigo-700' : 'bg-slate-50 border-transparent text-slate-500'}`}
+                >
+                  Cào 1 chương
+                </button>
+                <button 
+                  onClick={() => setCrawlOption('multi')} 
+                  className={`p-4 rounded-2xl font-bold transition-all border-2 ${crawlOption === 'multi' ? 'bg-indigo-50 border-indigo-500 text-indigo-700' : 'bg-slate-50 border-transparent text-slate-500'}`}
+                >
+                  Cào 10 chương tiếp
+                </button>
+              </div>
+
+              <div className="flex items-center gap-3 p-4 bg-slate-50 rounded-2xl cursor-pointer select-none" onClick={() => setIsCrawlOnly(!isCrawlOnly)}>
+                <div className={`w-6 h-6 rounded-md border-2 flex items-center justify-center transition-all ${isCrawlOnly ? 'bg-indigo-600 border-indigo-600' : 'bg-white border-slate-300'}`}>
+                  {isCrawlOnly && <CheckCircle className="w-4 h-4 text-white" />}
+                </div>
+                <span className="font-bold text-slate-600 text-sm">Chỉ cào nội dung gốc (không tự động dịch)</span>
+              </div>
+            </div>
+
+            <div className="flex gap-4 pt-4">
+              <button onClick={() => setShowLinkModal(false)} className="flex-1 font-bold text-slate-400">Hủy</button>
+              <button onClick={() => handleLinkCrawl(linkInput, crawlOption === 'multi' ? 10 : 1)} className="flex-[2] bg-indigo-600 text-white font-bold py-5 rounded-[1.5rem] shadow-xl hover:bg-indigo-700 transition-all flex items-center justify-center gap-3">
+                <Zap className="w-5 h-5 fill-current" /> Bắt đầu nạp
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       
       {showContextSetup && currentProject && (<div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"><div className="bg-white rounded-[3rem] w-full max-w-4xl h-[85vh] flex flex-col shadow-2xl overflow-hidden"><div className="px-10 py-8 border-b flex items-center justify-between"><h3 className="font-bold text-2xl">Bối cảnh & Từ điển</h3><button onClick={() => setShowContextSetup(false)} className="p-2.5 hover:bg-slate-100 rounded-2xl"><X className="w-7 h-7 text-slate-400" /></button></div><div className="flex-1 overflow-y-auto p-10 grid grid-cols-2 gap-8"><div className="space-y-2"><label className="text-xs font-extrabold text-slate-400 uppercase tracking-widest px-2">Từ điển (Gốc=Dịch)</label><textarea value={currentProject.dictionary} onChange={e => updateProject(currentProject.id, { dictionary: e.target.value })} className="w-full h-full min-h-[400px] p-6 rounded-[2rem] bg-slate-50 border-2 border-transparent focus:border-indigo-400 outline-none font-mono text-sm" /></div><div className="space-y-2"><label className="text-xs font-extrabold text-slate-400 uppercase tracking-widest px-2">Bối cảnh</label><textarea value={currentProject.globalContext} onChange={e => updateProject(currentProject.id, { globalContext: e.target.value })} className="w-full h-full min-h-[400px] p-6 rounded-[2rem] bg-slate-50 border-2 border-transparent focus:border-indigo-400 outline-none text-sm" /></div></div><div className="p-8 bg-slate-50 border-t flex justify-end gap-4"><button onClick={handleAIAnalyze} disabled={isAnalyzing} className="flex items-center gap-2 px-6 py-4 bg-amber-50 text-amber-600 rounded-2xl font-bold text-sm hover:bg-amber-100">{isAnalyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand className="w-4 h-4" />}AI Phân Tích</button><button onClick={() => setShowContextSetup(false)} className="bg-indigo-600 text-white font-bold py-4 px-12 rounded-2xl shadow-xl">Lưu cấu hình</button></div></div></div>)}
 
