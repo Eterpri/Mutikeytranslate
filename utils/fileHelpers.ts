@@ -3,6 +3,7 @@ import JSZip from 'jszip';
 import { FileItem, FileStatus, StoryInfo } from './types';
 
 const PROXY_LIST = [
+    "/api/proxy?url=",
     "https://api.allorigins.win/raw?url=",
     "https://corsproxy.io/?",
     "https://api.codetabs.com/v1/proxy?quest=",
@@ -29,6 +30,11 @@ export const translateChapterTitle = (title: string): string => {
   const hanVietMap: Record<string, string> = { '一': '1', '二': '2', '三': '3', '四': '4', '五': '5', '六': '6', '七': '7', '八': '8', '九': '9', '十': '10' };
   clean = clean.replace(/第\s*([一二三四五六七八九十]+)\s*[章話节回]/g, (match, p1) => hanVietMap[p1] || p1);
   return clean;
+};
+
+const isChineseUrl = (url: string): boolean => {
+    const domains = ['.cn', '.com.cn', 'piaotia', '69shuba', 'biquge', 'shubao', 'paoshu', 'uukanshu', 'paoshu8', 'xbiquge', 'readwn', '69xinshu', 'ptwxz', '顶点', '笔趣阁'];
+    return domains.some(d => url.toLowerCase().includes(d));
 };
 
 const resolveUrl = (base: string, relative: string) => {
@@ -58,16 +64,46 @@ export const fetchContentFromUrl = async (url: string, isPaginationCall = false)
         try {
             const finalUrl = `${proxyBase}${encodeURIComponent(cleanUrl)}`;
             const response = await fetch(finalUrl);
-            if (!response.ok) continue;
+            if (!response.ok) {
+                console.warn(`Proxy ${proxyBase} returned error ${response.status}: ${response.statusText}`);
+                continue;
+            }
 
             const buffer = await response.arrayBuffer();
             
-            // Thử giải mã bằng UTF-8 trước để tìm tag charset
-            let decoder = new TextDecoder('utf-8');
-            let html = decoder.decode(buffer);
-            
-            if (html.toLowerCase().includes('charset=gbk') || html.toLowerCase().includes('charset=gb2312')) {
-                html = new TextDecoder('gbk').decode(buffer);
+            // 1. Kiểm tra header Content-Type trước
+            const contentType = response.headers.get('content-type') || '';
+            let charset = '';
+            const charsetMatch = contentType.match(/charset=([^;]+)/i);
+            if (charsetMatch) charset = charsetMatch[1].toLowerCase();
+
+            // 2. Nếu không có trong header, thử giải mã sơ bộ để tìm trong thẻ meta
+            let html = '';
+            if (!charset) {
+                // Giải mã bằng latin1 (ISO-8859-1) để giữ nguyên byte ASCII, giúp tìm tag charset chính xác hơn
+                const tempHtml = new TextDecoder('iso-8859-1').decode(buffer);
+                const metaMatch = tempHtml.match(/<meta[^>]+charset=["']?([^"'>\s/]+)/i) || 
+                                 tempHtml.match(/charset=["']?([^"'>\s/]+)/i);
+                if (metaMatch) {
+                    charset = metaMatch[1].toLowerCase();
+                }
+            }
+
+            // 3. Giải mã thực sự
+            try {
+                // Ưu tiên charset tìm được, nếu không có thì thử gbk (phổ biến ở web truyện Trung) rồi mới đến utf-8
+                const decoderCharset = charset || (isChineseUrl(cleanUrl) ? 'gbk' : 'utf-8');
+                html = new TextDecoder(decoderCharset).decode(buffer);
+                
+                // Kiểm tra xem có bị lỗi font (nhiều ký tự lạ \ufffd) không, nếu có thử lại với gbk/utf-8 ngược lại
+                // Chúng ta đếm số lượng ký tự lỗi, nếu quá nhiều thì chắc chắn sai encoding
+                const errorCharCount = (html.match(/\ufffd/g) || []).length;
+                if (errorCharCount > 10) {
+                     const fallbackCharset = decoderCharset.includes('utf') ? 'gbk' : 'utf-8';
+                     html = new TextDecoder(fallbackCharset).decode(buffer);
+                }
+            } catch (e) {
+                html = new TextDecoder('utf-8').decode(buffer);
             }
 
             const parser = new DOMParser();
